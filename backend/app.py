@@ -53,6 +53,7 @@ BACKEND_BASE_URL = os.environ.get("BACKEND_BASE_URL", "http://127.0.0.1:5000")
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
 redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
+# Celery (broker+backend on Redis) drives the async/scheduled jobs below: interview reminders, monthly placement reports, and user-triggered CSV exports
 celery_app = Celery(app.import_name, broker=REDIS_URL, backend=REDIS_URL)
 celery_app.conf.update(
     task_serializer="json",
