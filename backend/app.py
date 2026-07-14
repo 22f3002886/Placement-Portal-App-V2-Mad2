@@ -80,6 +80,7 @@ celery_app.conf.beat_schedule = {
 
 # ---------------- HELPERS ----------------
 
+# invalidates the Redis-cached hot dashboard reads (admin stats, company/student lists) so writes never serve stale data
 def clear_dashboard_caches():
     redis_client.delete("admin_stats", "companies_list", "admin_all_companies")
 
