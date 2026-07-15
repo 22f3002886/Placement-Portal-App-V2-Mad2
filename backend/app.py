@@ -6,7 +6,7 @@ from flask import Flask
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from flask_jwt_extended import JWTManager
 from celery import Celery
@@ -42,7 +42,13 @@ CORS(app, supports_credentials=True)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-only-secret-change-me")
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///placement.db"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-app.config["UPLOAD_FOLDER"] = "uploads"
+
+# an absolute path anchored to this file's own location - not just "uploads",
+# because that's resolved against whatever directory the process happens to
+# be *launched* from, and Flask (run.py) and Celery (worker) can each end up
+# with a different one depending on exactly how they're started. An absolute
+# path means both always agree on the same physical folder no matter what.
+app.config["UPLOAD_FOLDER"] = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
 app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024  # 5 MB cap on any uploaded file (resume / offer letter)
 jwt = JWTManager(app)
 db = SQLAlchemy(app)
@@ -53,7 +59,6 @@ BACKEND_BASE_URL = os.environ.get("BACKEND_BASE_URL", "http://127.0.0.1:5000")
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
 redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
-# Celery (broker+backend on Redis) drives the async/scheduled jobs below: interview reminders, monthly placement reports, and user-triggered CSV exports
 celery_app = Celery(app.import_name, broker=REDIS_URL, backend=REDIS_URL)
 celery_app.conf.update(
     task_serializer="json",
@@ -80,7 +85,6 @@ celery_app.conf.beat_schedule = {
 
 # ---------------- HELPERS ----------------
 
-# invalidates the Redis-cached hot dashboard reads (admin stats, company/student lists) so writes never serve stale data
 def clear_dashboard_caches():
     redis_client.delete("admin_stats", "companies_list", "admin_all_companies")
 
@@ -321,6 +325,12 @@ def export_student_applications_csv(student_profile_id):
 
         applications = Application.query.filter_by(student_id=profile.id).all()
 
+        # applied_at is stored in UTC (datetime.utcnow()) - writing that
+        # straight into the CSV with no label looks exactly like a local
+        # timestamp but is actually 5 hours 30 minutes behind IST, so
+        # convert it here before it goes in the file
+        ist_offset = timedelta(hours=5, minutes=30)
+
         with open(file_path, "w", newline="", encoding="utf-8") as csv_file:
             writer = csv.writer(csv_file)
             writer.writerow([
@@ -328,16 +338,17 @@ def export_student_applications_csv(student_profile_id):
                 "Company Name",
                 "Drive Title",
                 "Application Status",
-                "Applied At",
+                "Applied At (IST)",
             ])
 
             for application in applications:
+                applied_at_ist = application.applied_at + ist_offset if application.applied_at else ""
                 writer.writerow([
                     profile.user_id,
                     application.job.company.company_name if application.job and application.job.company else "",
                     application.job.title if application.job else "",
                     application.status,
-                    application.applied_at,
+                    applied_at_ist,
                 ])
 
         return {
@@ -413,15 +424,30 @@ def generate_monthly_placement_report():
             Application.updated_at < next_month_start,
         ).scalar() or 0
 
-        # build one row per drive that got at least one application this
-        # month — company, drive name, how many applied, and whether
-        # anyone from that drive was selected
+        # build one row per drive posted this month (even ones with zero
+        # applications so far, matching what Drives Conducted above already
+        # counts), plus any drive from an earlier month that got a fresh
+        # application this month — company, drive name, who applied, and
+        # whether anyone from that drive was selected
+        month_jobs = Job.query.filter(
+            Job.posted_at >= month_start,
+            Job.posted_at < next_month_start,
+        ).all()
+
+        drive_stats = {}
+        for job in month_jobs:
+            drive_stats[job.id] = {
+                "company_name": job.company.company_name if job.company else "N/A",
+                "job_title": job.title,
+                "applied_names": [],
+                "selected_names": [],
+            }
+
         month_applications = Application.query.filter(
             Application.applied_at >= month_start,
             Application.applied_at < next_month_start,
         ).all()
 
-        drive_stats = {}
         for application in month_applications:
             job = application.job
             if not job:
@@ -448,14 +474,14 @@ def generate_monthly_placement_report():
                 <tr>
                   <td>{row['company_name']}</td>
                   <td>{row['job_title']}</td>
-                  <td>{", ".join(row['applied_names'])}</td>
+                  <td>{", ".join(row['applied_names']) if row['applied_names'] else "None yet"}</td>
                   <td>{", ".join(row['selected_names']) if row['selected_names'] else "No"}</td>
                 </tr>
                 """
                 for row in drive_stats.values()
             )
         else:
-            drive_rows_html = "<tr><td colspan=\"4\">No drives with applications this month.</td></tr>"
+            drive_rows_html = "<tr><td colspan=\"4\">No drives this month.</td></tr>"
 
         report_html = f"""
         <html>

@@ -250,7 +250,6 @@ def apply_for_job(job_id):
     if not student_is_eligible_for_job(profile, job):
         return jsonify({"message": "You do not meet the eligibility requirements for this job"}), 400
 
-    # one Application row per (student, job); its status field is the full history: Applied -> Shortlisted -> Interview -> Offer -> Rejected/Placed
     already_applied = Application.query.filter_by(job_id=job_id, student_id=profile.id).first()
 
     if already_applied:

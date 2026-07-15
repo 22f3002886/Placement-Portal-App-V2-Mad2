@@ -397,9 +397,10 @@ def update_application_status(app_id):
     if status == "Selected":
         offer_letter_file = request.files.get("offer_letter")
         filename = secure_filename(offer_letter_file.filename)
-        path = os.path.join("uploads/offers", filename)
-        offer_letter_file.save(path)
-        application.offer_letter = path
+        offers_folder = os.path.join(app.config["UPLOAD_FOLDER"], "offers")
+        os.makedirs(offers_folder, exist_ok=True)
+        offer_letter_file.save(os.path.join(offers_folder, filename))
+        application.offer_letter = os.path.join("uploads/offers", filename)
 
         # mark student placed
         application.student.placement_status = "Placed"
